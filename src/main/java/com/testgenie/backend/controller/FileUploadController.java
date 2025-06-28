@@ -6,95 +6,108 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.*;
+import java.nio.file.*;
 import java.util.*;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 @RestController
 @RequestMapping("/api")
-@CrossOrigin(origins = "http://localhost:5173") // Frontend URL
+@CrossOrigin(origins = "http://localhost:5173") // Adjust for frontend
 public class FileUploadController {
 
-    private static final String UPLOAD_DIR = System.getProperty("user.dir") + "/uploads/";
+    private static final Path UPLOAD_DIR = Paths.get(System.getProperty("user.dir"), "uploads");
 
     @PostMapping("/upload")
     public ResponseEntity<?> uploadFiles(@RequestParam("files") MultipartFile[] files) {
-        File uploadDir = new File(UPLOAD_DIR);
-        if (!uploadDir.exists()) uploadDir.mkdirs();
-
         try {
+            if (!Files.exists(UPLOAD_DIR)) Files.createDirectories(UPLOAD_DIR);
+
             for (MultipartFile file : files) {
-                String originalFilename = file.getOriginalFilename();
-                if (originalFilename == null) originalFilename = "unknown.zip";
+                String originalFilename = Optional.ofNullable(file.getOriginalFilename()).orElse("unknown.zip");
 
+                // Sanitize filename
                 String safeFileName = originalFilename.replaceAll("[^a-zA-Z0-9\\.\\-_]", "_");
-                File savedFile = new File(UPLOAD_DIR + safeFileName);
-                file.transferTo(savedFile);
+                Path savedPath = UPLOAD_DIR.resolve(safeFileName).normalize();
 
-                // Unzip logic
-                if (safeFileName.toLowerCase().endsWith(".zip")) {
-                    String baseName = safeFileName.substring(0, safeFileName.lastIndexOf('.'));
-                    File extractTo = new File(UPLOAD_DIR + baseName + "/");
-                    extractTo.mkdirs();
+                // Save file
+                file.transferTo(savedPath.toFile());
 
-                    unzip(savedFile, extractTo);
-                    System.out.println("Unzipped to: " + extractTo.getAbsolutePath());
-
-                    // ✅ Return projectName as JSON
-                    Map<String, String> response = new HashMap<>();
-                    response.put("projectName", baseName);
-                    String projectName = safeFileName.substring(0, safeFileName.lastIndexOf('.'));
-                    return ResponseEntity.ok(Map.of("projectName", projectName));
+                if (!safeFileName.toLowerCase().endsWith(".zip")) {
+                    continue; // skip non-zip files
                 }
+
+                String projectName = safeFileName.substring(0, safeFileName.lastIndexOf('.'));
+                Path extractTo = UPLOAD_DIR.resolve(projectName).normalize();
+
+                // Ensure path safety
+                if (!extractTo.startsWith(UPLOAD_DIR)) {
+                    return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("Invalid project name.");
+                }
+
+                Files.createDirectories(extractTo);
+                unzip(savedPath, extractTo);
+
+                return ResponseEntity.ok(Map.of("projectName", projectName));
             }
 
-            // If no zip found
-            return ResponseEntity.badRequest().body("No zip file found to process.");
+            return ResponseEntity.badRequest().body("No ZIP files found to process.");
         } catch (IOException e) {
             e.printStackTrace();
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body("File upload failed.");
+                    .body("File upload or extraction failed.");
         }
     }
+
     @GetMapping("/uploaded-projects")
     public ResponseEntity<List<String>> listUploadedProjects() {
-        File uploadsDir = new File(System.getProperty("user.dir"), "uploads");
-        if (!uploadsDir.exists() || !uploadsDir.isDirectory()) {
-            return ResponseEntity.ok(Collections.emptyList());
-        }
+        try {
+            if (!Files.exists(UPLOAD_DIR)) {
+                return ResponseEntity.ok(Collections.emptyList());
+            }
 
-        String[] projectNames = uploadsDir.list((dir, name) -> new File(dir, name).isDirectory());
-        return ResponseEntity.ok(projectNames == null ? List.of() : Arrays.asList(projectNames));
+            try (var stream = Files.list(UPLOAD_DIR)) {
+                List<String> projects = stream
+                        .filter(Files::isDirectory)
+                        .map(path -> path.getFileName().toString())
+                        .toList();
+                return ResponseEntity.ok(projects);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(List.of());
+        }
     }
 
-
-    private void unzip(File zipFile, File targetDir) throws IOException {
-        try (ZipInputStream zis = new ZipInputStream(new FileInputStream(zipFile))) {
+    private void unzip(Path zipPath, Path targetDir) throws IOException {
+        try (ZipInputStream zis = new ZipInputStream(new FileInputStream(zipPath.toFile()))) {
             ZipEntry entry;
             byte[] buffer = new byte[4096];
 
             while ((entry = zis.getNextEntry()) != null) {
-                File newFile = new File(targetDir, entry.getName());
+                Path newPath = resolveSecureZipEntry(targetDir, entry.getName());
 
                 if (entry.isDirectory()) {
-                    newFile.mkdirs();
-                    continue;
-                }
-
-                // Create parent folders if needed
-                new File(newFile.getParent()).mkdirs();
-
-                try (FileOutputStream fos = new FileOutputStream(newFile)) {
-                    int len;
-                    while ((len = zis.read(buffer)) > 0) {
-                        fos.write(buffer, 0, len);
+                    Files.createDirectories(newPath);
+                } else {
+                    Files.createDirectories(newPath.getParent());
+                    try (OutputStream fos = Files.newOutputStream(newPath)) {
+                        int len;
+                        while ((len = zis.read(buffer)) > 0) {
+                            fos.write(buffer, 0, len);
+                        }
                     }
-                } catch (FileNotFoundException e) {
-                    throw new RuntimeException(e);
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
                 }
             }
         }
+    }
+
+    private Path resolveSecureZipEntry(Path targetDir, String entryName) throws IOException {
+        Path resolvedPath = targetDir.resolve(entryName).normalize();
+        if (!resolvedPath.startsWith(targetDir)) {
+            throw new IOException("Entry is outside the target dir: " + entryName);
+        }
+        return resolvedPath;
     }
 }

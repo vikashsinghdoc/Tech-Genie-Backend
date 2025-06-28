@@ -14,27 +14,30 @@ import java.util.*;
 @CrossOrigin(origins = "http://localhost:5173")
 public class FileDescriptionController {
 
-    private static final String BASE_UPLOAD_PATH = System.getProperty("user.dir") + "/uploads";
+    private static final Path BASE_UPLOAD_PATH = Paths.get(System.getProperty("user.dir"), "uploads");
     private final ObjectMapper mapper = new ObjectMapper();
 
-    // POST /api/files/describe → Save or update a description
+    // POST: Save or update a file description
     @PostMapping("/describe")
-    public ResponseEntity<String> saveDescription(@RequestBody Map<String, String> requestBody) {
-        String project = requestBody.get("project");
-        String file = requestBody.get("file");
-        String description = requestBody.get("description");
+    public ResponseEntity<Map<String, String>> saveDescription(@RequestBody Map<String, String> request) {
+        String project = request.get("project");
+        String filePath = request.get("file");
+        String description = request.get("description");
 
-        if (project == null || file == null || description == null) {
-            return ResponseEntity.badRequest().body("Missing required fields.");
+        if (project == null || filePath == null || description == null) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Missing required fields."));
         }
 
-        Path metaDir = Paths.get(BASE_UPLOAD_PATH, project, "meta");
+        Path metaDir = BASE_UPLOAD_PATH.resolve(project).resolve("meta").normalize();
         Path descFile = metaDir.resolve("descriptions.json");
 
+        // Protect against invalid project path
+        if (!metaDir.startsWith(BASE_UPLOAD_PATH)) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Invalid project path."));
+        }
+
         try {
-            if (!Files.exists(metaDir)) {
-                Files.createDirectories(metaDir);
-            }
+            Files.createDirectories(metaDir);
 
             Map<String, String> descriptions = new HashMap<>();
 
@@ -42,33 +45,42 @@ public class FileDescriptionController {
                 descriptions = mapper.readValue(descFile.toFile(), new TypeReference<>() {});
             }
 
-            descriptions.put(file, description);
+            descriptions.put(filePath, description);
             mapper.writerWithDefaultPrettyPrinter().writeValue(descFile.toFile(), descriptions);
 
-            return ResponseEntity.ok("Saved");
+            return ResponseEntity.ok(Map.of("message", "Description saved."));
         } catch (IOException e) {
             e.printStackTrace();
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Failed to save description.");
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Failed to save description."));
         }
     }
 
-    // GET /api/files/describe?project=...&file=... → Get description
+    // GET: Retrieve a file description
     @GetMapping("/describe")
-    public ResponseEntity<String> getDescription(@RequestParam String project, @RequestParam String file) {
-        Path descFile = Paths.get(BASE_UPLOAD_PATH, project, "meta", "descriptions.json");
+    public ResponseEntity<Map<String, String>> getDescription(
+            @RequestParam String project,
+            @RequestParam String file) {
+
+        Path descFile = BASE_UPLOAD_PATH.resolve(project).resolve("meta").resolve("descriptions.json").normalize();
+
+        if (!descFile.startsWith(BASE_UPLOAD_PATH)) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Invalid project path."));
+        }
 
         try {
             if (!Files.exists(descFile)) {
-                return ResponseEntity.ok(""); // Return empty if nothing saved yet
+                return ResponseEntity.ok(Map.of("description", ""));
             }
 
             Map<String, String> descriptions = mapper.readValue(descFile.toFile(), new TypeReference<>() {});
             String description = descriptions.getOrDefault(file, "");
 
-            return ResponseEntity.ok(description);
+            return ResponseEntity.ok(Map.of("description", description));
         } catch (IOException e) {
             e.printStackTrace();
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Failed to read description.");
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Failed to read description."));
         }
     }
 }
