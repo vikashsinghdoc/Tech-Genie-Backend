@@ -2,13 +2,12 @@ package com.testgenie.backend.controller;
 
 import com.testgenie.backend.dto.ExtractionStatsDTO;
 import com.testgenie.backend.dto.UploadResponseDTO;
+import com.testgenie.backend.service.FileStorageService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
@@ -25,17 +24,12 @@ import java.util.zip.ZipInputStream;
 @Tag(name = "File Upload")
 public class FileUploadController {
 
-    @Value("${storage.base-path}")
-    private String uploadBasePath;
-
-    private Path UPLOAD_DIR;
-
-    @PostConstruct
-    public void init() {
-        this.UPLOAD_DIR = Paths.get(uploadBasePath).toAbsolutePath().normalize();
-    }
-
+    private final FileStorageService fileStorageService;
     private static final Logger logger = LoggerFactory.getLogger(FileUploadController.class);
+
+    public FileUploadController(FileStorageService fileStorageService) {
+        this.fileStorageService = fileStorageService;
+    }
 
     @Operation(summary = "Upload ZIP file(s) and extract project")
     @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
@@ -43,24 +37,19 @@ public class FileUploadController {
             @Parameter(description = "ZIP file(s)", required = true)
             @RequestParam("files") List<MultipartFile> files) {
         try {
-            if (!Files.exists(UPLOAD_DIR)) Files.createDirectories(UPLOAD_DIR);
-
             for (MultipartFile file : files) {
-                String originalFilename = Optional.ofNullable(file.getOriginalFilename()).orElse("unknown.zip");
-                String safeFileName = originalFilename.replaceAll("[^a-zA-Z0-9\\.\\-_]", "_");
-                Path savedPath = UPLOAD_DIR.resolve(safeFileName).normalize();
-
-                file.transferTo(savedPath.toFile());
+                Path savedPath = fileStorageService.saveZipFile(file);
+                String safeFileName = savedPath.getFileName().toString();
 
                 if (!safeFileName.toLowerCase().endsWith(".zip")) {
                     continue;
                 }
 
                 String projectName = safeFileName.substring(0, safeFileName.lastIndexOf('.'));
-                Path extractTo = UPLOAD_DIR.resolve(projectName).normalize();
+                Path extractTo = fileStorageService.getProjectPath(projectName);
 
-                if (!extractTo.startsWith(UPLOAD_DIR)) {
-                    return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("Invalid project name.");
+                if (!extractTo.startsWith(fileStorageService.getBaseDir())) {
+                    return ResponseEntity.badRequest().body("Invalid project name.");
                 }
 
                 Files.createDirectories(extractTo);
@@ -70,7 +59,7 @@ public class FileUploadController {
                 return ResponseEntity.ok(response);
             }
 
-            return ResponseEntity.badRequest().body("No ZIP files found to process.");
+            return ResponseEntity.badRequest().body("No valid ZIP files to upload.");
         } catch (IOException e) {
             logger.error("Upload failed", e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Upload or extraction failed.");
@@ -80,15 +69,8 @@ public class FileUploadController {
     @GetMapping("/uploaded-projects")
     public ResponseEntity<List<String>> listUploadedProjects() {
         try {
-            if (!Files.exists(UPLOAD_DIR)) return ResponseEntity.ok(Collections.emptyList());
-
-            try (var stream = Files.list(UPLOAD_DIR)) {
-                List<String> projects = stream
-                        .filter(Files::isDirectory)
-                        .map(path -> path.getFileName().toString())
-                        .toList();
-                return ResponseEntity.ok(projects);
-            }
+            List<String> projects = fileStorageService.listAllProjects();
+            return ResponseEntity.ok(projects);
         } catch (IOException e) {
             logger.error("Listing projects failed", e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(List.of());
@@ -145,8 +127,7 @@ public class FileUploadController {
         }
 
         List<String> denyFolders = List.of(
-                "node_modules/", "__pycache__/", "venv/", ".idea/",
-                ".vscode/", "target/", "build/"
+                "node_modules/", "__pycache__/", "venv/", ".idea/", ".vscode/", "target/", "build/"
         );
         for (String folder : denyFolders) {
             if (lowerName.contains(folder)) {
@@ -155,8 +136,7 @@ public class FileUploadController {
         }
 
         List<String> denyExtensions = List.of(
-                ".jar", ".class", ".exe", ".dll", ".so", ".bin",
-                ".zip", ".tar", ".7z", ".rar",
+                ".jar", ".class", ".exe", ".dll", ".so", ".bin", ".zip", ".tar", ".7z", ".rar",
                 ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",
                 ".mp4", ".mp3", ".wav", ".mov", ".avi",
                 ".log", ".pdf"
