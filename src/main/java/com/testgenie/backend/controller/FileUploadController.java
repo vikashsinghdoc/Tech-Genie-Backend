@@ -3,6 +3,7 @@ package com.testgenie.backend.controller;
 import com.testgenie.backend.dto.ExtractionStatsDTO;
 import com.testgenie.backend.dto.UploadResponseDTO;
 import com.testgenie.backend.service.FileStorageService;
+import com.testgenie.backend.service.ProjectMetadataService; // ✅ Add this
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -25,10 +26,14 @@ import java.util.zip.ZipInputStream;
 public class FileUploadController {
 
     private final FileStorageService fileStorageService;
+    private final ProjectMetadataService projectMetadataService; // ✅ Injected service
+
     private static final Logger logger = LoggerFactory.getLogger(FileUploadController.class);
 
-    public FileUploadController(FileStorageService fileStorageService) {
+    public FileUploadController(FileStorageService fileStorageService,
+                                ProjectMetadataService projectMetadataService) {
         this.fileStorageService = fileStorageService;
+        this.projectMetadataService = projectMetadataService;
     }
 
     @Operation(summary = "Upload ZIP file(s) and extract project")
@@ -54,6 +59,21 @@ public class FileUploadController {
 
                 Files.createDirectories(extractTo);
                 ExtractionStatsDTO stats = unzip(savedPath, extractTo);
+
+                // ✅ Calculate total file size
+                long totalSize = Files.walk(extractTo)
+                        .filter(Files::isRegularFile)
+                        .mapToLong(p -> {
+                            try {
+                                return Files.size(p);
+                            } catch (IOException e) {
+                                return 0L;
+                            }
+                        })
+                        .sum();
+
+                // ✅ Save metadata to DB
+                projectMetadataService.saveMetadata(projectName, stats.getExtracted(), totalSize);
 
                 UploadResponseDTO response = new UploadResponseDTO(projectName, stats);
                 return ResponseEntity.ok(response);
