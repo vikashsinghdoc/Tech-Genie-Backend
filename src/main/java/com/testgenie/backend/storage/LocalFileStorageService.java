@@ -7,7 +7,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.*;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Stream;
@@ -54,5 +56,34 @@ public class LocalFileStorageService implements FileStorageService {
     @Override
     public Path getBaseDir() {
         return baseDir;
+    }
+
+    // ✅ Add this method to support replacing projects
+    @Override
+    public void replaceProject(String projectName, Path newExtractedPath) throws IOException {
+        Path projectPath = getProjectPath(projectName);
+
+        if (Files.exists(projectPath)) {
+            deleteRecursively(projectPath);
+        }
+
+        Files.move(newExtractedPath, projectPath, StandardCopyOption.REPLACE_EXISTING);
+    }
+
+
+    // ✅ Add this method to recursively delete old project folder
+    @Override
+    public void deleteRecursively(Path path) throws IOException {
+        if (Files.exists(path)) {
+            Files.walk(path)
+                    .sorted(Comparator.reverseOrder())
+                    .forEach(p -> {
+                        try {
+                            Files.delete(p);
+                        } catch (IOException e) {
+                            throw new UncheckedIOException(e);
+                        }
+                    });
+        }
     }
 }

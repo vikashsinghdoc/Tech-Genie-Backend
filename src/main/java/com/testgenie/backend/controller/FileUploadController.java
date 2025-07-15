@@ -2,8 +2,11 @@ package com.testgenie.backend.controller;
 
 import com.testgenie.backend.dto.ExtractionStatsDTO;
 import com.testgenie.backend.dto.UploadResponseDTO;
+import com.testgenie.backend.entity.ProjectMetadata;
 import com.testgenie.backend.service.FileStorageService;
-import com.testgenie.backend.service.ProjectMetadataService; // ✅ Add this
+import com.testgenie.backend.service.ProjectMetadataService;
+import com.testgenie.backend.util.DescriptionMergeUtil;
+import com.testgenie.backend.util.ProjectHashUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -15,6 +18,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.*;
 import java.nio.file.*;
+import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -26,14 +30,20 @@ import java.util.zip.ZipInputStream;
 public class FileUploadController {
 
     private final FileStorageService fileStorageService;
-    private final ProjectMetadataService projectMetadataService; // ✅ Injected service
+    private final ProjectMetadataService projectMetadataService;
+    private final ProjectHashUtil projectHashUtil;
+    private final DescriptionMergeUtil descriptionMergeUtil;
 
     private static final Logger logger = LoggerFactory.getLogger(FileUploadController.class);
 
     public FileUploadController(FileStorageService fileStorageService,
-                                ProjectMetadataService projectMetadataService) {
+                                ProjectMetadataService projectMetadataService,
+                                ProjectHashUtil projectHashUtil,
+                                DescriptionMergeUtil descriptionMergeUtil) {
         this.fileStorageService = fileStorageService;
         this.projectMetadataService = projectMetadataService;
+        this.projectHashUtil = projectHashUtil;
+        this.descriptionMergeUtil = descriptionMergeUtil;
     }
 
     @Operation(summary = "Upload ZIP file(s) and extract project")
@@ -51,17 +61,10 @@ public class FileUploadController {
                 }
 
                 String projectName = safeFileName.substring(0, safeFileName.lastIndexOf('.'));
-                Path extractTo = fileStorageService.getProjectPath(projectName);
+                Path tempDir = Files.createTempDirectory("extract-" + projectName);
+                ExtractionStatsDTO stats = unzip(savedPath, tempDir);
 
-                if (!extractTo.startsWith(fileStorageService.getBaseDir())) {
-                    return ResponseEntity.badRequest().body("Invalid project name.");
-                }
-
-                Files.createDirectories(extractTo);
-                ExtractionStatsDTO stats = unzip(savedPath, extractTo);
-
-                // ✅ Calculate total file size
-                long totalSize = Files.walk(extractTo)
+                long totalSize = Files.walk(tempDir)
                         .filter(Files::isRegularFile)
                         .mapToLong(p -> {
                             try {
@@ -72,15 +75,32 @@ public class FileUploadController {
                         })
                         .sum();
 
-                // ✅ Save metadata to DB
-                projectMetadataService.saveMetadata(projectName, stats.getExtracted(), totalSize);
+                String hash = projectHashUtil.computeHash(tempDir);
+                Optional<ProjectMetadata> existingOpt = projectMetadataService.findByProjectName(projectName);
 
-                UploadResponseDTO response = new UploadResponseDTO(projectName, stats);
-                return ResponseEntity.ok(response);
+                if (existingOpt.isPresent()) {
+                    ProjectMetadata existing = existingOpt.get();
+                    if (hash.equals(existing.getHash())) {
+                        deleteRecursively(tempDir);
+                        return ResponseEntity.ok(new UploadResponseDTO("alreadyUploaded"));
+                    } else {
+                        Path oldPath = fileStorageService.getProjectPath(projectName);
+                        int preservedCount = descriptionMergeUtil.mergeDescriptions(oldPath, tempDir);
+                        fileStorageService.replaceProject(projectName, tempDir);
+                        projectMetadataService.updateMetadata(projectName, stats.getExtracted(), totalSize, hash);
+                        return ResponseEntity.ok(new UploadResponseDTO(projectName, stats, preservedCount));
+                    }
+                }
+
+                // New project
+                Path targetPath = fileStorageService.getProjectPath(projectName);
+                Files.move(tempDir, targetPath, StandardCopyOption.REPLACE_EXISTING);
+                projectMetadataService.saveMetadata(projectName, stats.getExtracted(), totalSize, hash);
+                return ResponseEntity.ok(new UploadResponseDTO(projectName, stats));
             }
 
             return ResponseEntity.badRequest().body("No valid ZIP files to upload.");
-        } catch (IOException e) {
+        } catch (IOException | NoSuchAlgorithmException e) {
             logger.error("Upload failed", e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Upload or extraction failed.");
         }
@@ -176,5 +196,19 @@ public class FileUploadController {
             throw new IOException("Entry is outside target dir: " + entryName);
         }
         return resolvedPath;
+    }
+
+    private void deleteRecursively(Path path) throws IOException {
+        if (Files.exists(path)) {
+            Files.walk(path)
+                    .sorted(Comparator.reverseOrder())
+                    .forEach(p -> {
+                        try {
+                            Files.delete(p);
+                        } catch (IOException e) {
+                            throw new UncheckedIOException(e);
+                        }
+                    });
+        }
     }
 }

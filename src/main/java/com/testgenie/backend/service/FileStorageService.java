@@ -14,4 +14,10 @@ public interface FileStorageService {
     List<String> listAllProjects() throws IOException;
 
     Path getBaseDir();
+
+    // ✅ Add this to support replacing an existing project
+    void replaceProject(String projectName, Path newExtractedPath) throws IOException;
+
+    // ✅ Add this to support recursive delete during replacement
+    void deleteRecursively(Path path) throws IOException;
 }
