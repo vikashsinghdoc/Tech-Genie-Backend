@@ -15,9 +15,12 @@ public interface FileStorageService {
 
     Path getBaseDir();
 
-    // ✅ Add this to support replacing an existing project
-    void replaceProject(String projectName, Path newExtractedPath) throws IOException;
 
-    // ✅ Add this to support recursive delete during replacement
+    void replaceProject(String projectName, Path sourceDir) throws IOException;
+
+    void saveNewProject(String projectName, Path sourceDir) throws IOException;
+
     void deleteRecursively(Path path) throws IOException;
+
+    Path downloadZipToTemp(Path s3Path) throws IOException; // 👈 NEW METHOD
 }

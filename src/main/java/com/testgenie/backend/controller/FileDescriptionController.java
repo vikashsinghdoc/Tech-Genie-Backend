@@ -34,9 +34,15 @@ public class FileDescriptionController {
             return ResponseEntity.badRequest().body(Map.of("error", "Missing required fields."));
         }
 
-        descriptionService.save(project, filePath, description);
-        return ResponseEntity.ok(Map.of("message", "Description saved."));
+        try {
+            descriptionService.save(project, filePath, description);
+            return ResponseEntity.ok(Map.of("message", "Description saved."));
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.internalServerError().body(Map.of("error", "Failed to save description."));
+        }
     }
+
 
     // GET: Retrieve a file or project description
     @GetMapping("/describe")

@@ -58,7 +58,6 @@ public class LocalFileStorageService implements FileStorageService {
         return baseDir;
     }
 
-    // ✅ Add this method to support replacing projects
     @Override
     public void replaceProject(String projectName, Path newExtractedPath) throws IOException {
         Path projectPath = getProjectPath(projectName);
@@ -70,8 +69,6 @@ public class LocalFileStorageService implements FileStorageService {
         Files.move(newExtractedPath, projectPath, StandardCopyOption.REPLACE_EXISTING);
     }
 
-
-    // ✅ Add this method to recursively delete old project folder
     @Override
     public void deleteRecursively(Path path) throws IOException {
         if (Files.exists(path)) {
@@ -85,5 +82,35 @@ public class LocalFileStorageService implements FileStorageService {
                         }
                     });
         }
+    }
+
+    @Override
+    public void saveNewProject(String projectName, Path sourceDir) throws IOException {
+        Path targetPath = getProjectPath(projectName);
+        deleteRecursively(targetPath); // clear if already exists
+        Files.createDirectories(targetPath);
+
+        Files.walk(sourceDir)
+                .forEach(source -> {
+                    try {
+                        Path relative = sourceDir.relativize(source);
+                        Path destination = targetPath.resolve(relative);
+                        if (Files.isDirectory(source)) {
+                            Files.createDirectories(destination);
+                        } else {
+                            Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING);
+                        }
+                    } catch (IOException e) {
+                        throw new UncheckedIOException(e);
+                    }
+                });
+
+        System.out.println("✅ Saved new project to local: " + targetPath);
+    }
+
+    // ✅ This is only needed to satisfy the interface. For local, just return the path directly.
+    @Override
+    public Path downloadZipToTemp(Path path) {
+        return path; // It's already a real file path on disk
     }
 }
