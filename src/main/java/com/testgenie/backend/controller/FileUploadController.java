@@ -5,7 +5,6 @@ import com.testgenie.backend.dto.UploadResponseDTO;
 import com.testgenie.backend.entity.ProjectMetadata;
 import com.testgenie.backend.service.FileStorageService;
 import com.testgenie.backend.service.ProjectMetadataService;
-import com.testgenie.backend.util.DescriptionMergeUtil;
 import com.testgenie.backend.util.ProjectHashUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -15,11 +14,14 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 
 import java.io.*;
 import java.nio.file.*;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
+import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -32,18 +34,15 @@ public class FileUploadController {
     private final FileStorageService fileStorageService;
     private final ProjectMetadataService projectMetadataService;
     private final ProjectHashUtil projectHashUtil;
-    private final DescriptionMergeUtil descriptionMergeUtil;
 
     private static final Logger logger = LoggerFactory.getLogger(FileUploadController.class);
 
     public FileUploadController(FileStorageService fileStorageService,
                                 ProjectMetadataService projectMetadataService,
-                                ProjectHashUtil projectHashUtil,
-                                DescriptionMergeUtil descriptionMergeUtil) {
+                                ProjectHashUtil projectHashUtil) {
         this.fileStorageService = fileStorageService;
         this.projectMetadataService = projectMetadataService;
         this.projectHashUtil = projectHashUtil;
-        this.descriptionMergeUtil = descriptionMergeUtil;
     }
 
     @Operation(summary = "Upload ZIP file(s) and extract project")
@@ -60,11 +59,25 @@ public class FileUploadController {
                     continue;
                 }
 
-                String projectName = safeFileName.substring(0, safeFileName.lastIndexOf('.'));
-                Path tempDir = Files.createTempDirectory("extract-" + projectName);
-                ExtractionStatsDTO stats = unzip(savedPath, tempDir);
+                Path localZipFile = fileStorageService.downloadZipToTemp(savedPath);
 
-                long totalSize = Files.walk(tempDir)
+                String projectName = safeFileName.substring(0, safeFileName.lastIndexOf('.'));
+                Path tempExtractDir = Files.createTempDirectory("extract-");
+
+                // Flattening: extract and detect root folder
+                ExtractionStatsDTO stats = unzip(localZipFile, tempExtractDir);
+
+                // If the zip has one root folder, flatten it
+                Path contentRoot = flattenIfWrappedInSingleFolder(tempExtractDir);
+
+                long fileCount = Files.walk(contentRoot).filter(Files::isRegularFile).count();
+                System.out.println("📂 Extracted file count: " + fileCount);
+
+                if (fileCount == 0) {
+                    return ResponseEntity.badRequest().body("No valid files found inside the ZIP.");
+                }
+
+                long totalSize = Files.walk(contentRoot)
                         .filter(Files::isRegularFile)
                         .mapToLong(p -> {
                             try {
@@ -72,30 +85,26 @@ public class FileUploadController {
                             } catch (IOException e) {
                                 return 0L;
                             }
-                        })
-                        .sum();
+                        }).sum();
 
-                String hash = projectHashUtil.computeHash(tempDir);
+                String hash = projectHashUtil.computeHash(contentRoot);
+
                 Optional<ProjectMetadata> existingOpt = projectMetadataService.findByProjectName(projectName);
-
                 if (existingOpt.isPresent()) {
                     ProjectMetadata existing = existingOpt.get();
+
                     if (hash.equals(existing.getHash())) {
-                        deleteRecursively(tempDir);
                         return ResponseEntity.ok(new UploadResponseDTO("alreadyUploaded"));
                     } else {
-                        Path oldPath = fileStorageService.getProjectPath(projectName);
-                        int preservedCount = descriptionMergeUtil.mergeDescriptions(oldPath, tempDir);
-                        fileStorageService.replaceProject(projectName, tempDir);
+                        fileStorageService.replaceProject(projectName, contentRoot);
                         projectMetadataService.updateMetadata(projectName, stats.getExtracted(), totalSize, hash);
-                        return ResponseEntity.ok(new UploadResponseDTO(projectName, stats, preservedCount));
+                        return ResponseEntity.ok(new UploadResponseDTO("replaced"));
                     }
                 }
 
-                // New project
-                Path targetPath = fileStorageService.getProjectPath(projectName);
-                Files.move(tempDir, targetPath, StandardCopyOption.REPLACE_EXISTING);
+                fileStorageService.saveNewProject(projectName, contentRoot);
                 projectMetadataService.saveMetadata(projectName, stats.getExtracted(), totalSize, hash);
+
                 return ResponseEntity.ok(new UploadResponseDTO(projectName, stats));
             }
 
@@ -159,6 +168,16 @@ public class FileUploadController {
         return new ExtractionStatsDTO(extracted, skipped, skippedByType);
     }
 
+    private Path flattenIfWrappedInSingleFolder(Path extractedDir) throws IOException {
+        try (Stream<Path> files = Files.list(extractedDir)) {
+            List<Path> entries = files.toList();
+            if (entries.size() == 1 && Files.isDirectory(entries.get(0))) {
+                return entries.get(0); // inner folder
+            }
+        }
+        return extractedDir; // no need to flatten
+    }
+
     private String getSkipReason(String entryName) {
         String lowerName = entryName.toLowerCase();
 
@@ -166,21 +185,16 @@ public class FileUploadController {
             return ".hidden";
         }
 
-        List<String> denyFolders = List.of(
-                "node_modules/", "__pycache__/", "venv/", ".idea/", ".vscode/", "target/", "build/"
-        );
+        List<String> denyFolders = List.of("node_modules/", "__pycache__", "venv/", ".idea/", ".vscode/", "target/", "build/");
         for (String folder : denyFolders) {
             if (lowerName.contains(folder)) {
                 return folder.replace("/", "");
             }
         }
 
-        List<String> denyExtensions = List.of(
-                ".jar", ".class", ".exe", ".dll", ".so", ".bin", ".zip", ".tar", ".7z", ".rar",
-                ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",
-                ".mp4", ".mp3", ".wav", ".mov", ".avi",
-                ".log", ".pdf"
-        );
+        List<String> denyExtensions = List.of(".jar", ".class", ".exe", ".dll", ".so", ".bin", ".zip",
+                ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".mp4", ".mp3", ".wav", ".mov", ".avi",
+                ".log", ".pdf", ".apk");
         for (String ext : denyExtensions) {
             if (lowerName.endsWith(ext)) {
                 return ext;
@@ -196,19 +210,5 @@ public class FileUploadController {
             throw new IOException("Entry is outside target dir: " + entryName);
         }
         return resolvedPath;
-    }
-
-    private void deleteRecursively(Path path) throws IOException {
-        if (Files.exists(path)) {
-            Files.walk(path)
-                    .sorted(Comparator.reverseOrder())
-                    .forEach(p -> {
-                        try {
-                            Files.delete(p);
-                        } catch (IOException e) {
-                            throw new UncheckedIOException(e);
-                        }
-                    });
-        }
     }
 }
